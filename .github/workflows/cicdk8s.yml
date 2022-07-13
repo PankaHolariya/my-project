@@ -1,0 +1,89 @@
+name: DEV - Build and Deploy
+
+on:
+  push:
+    branches:
+      - testingbranch
+
+env:
+  GKE_PROJECT: ${{ secrets.GCP_PROJECT_ID_DEV }}
+  GCR_GKE_PROJECT: ibo-platform-components
+  GITHUB_SHA: ${{ github.sha }}
+  GKE_ZONE: asia-south1
+  IMAGE: ebo-authn-services
+  REGISTRY_HOSTNAME: us.gcr.io
+  APP_NAME: ebo-authn-services
+
+jobs:
+  node-build-deploy:
+    runs-on: core-app
+
+    strategy:
+      matrix:
+        node-version: [14.x]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@ebomart'
+
+      - name: Update to npm 8.x
+        run: npm i -g npm@8
+
+      - name: Remove .npmrc
+        run: rm -rf .npmrc
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Restore .npmrc
+        run: git checkout .npmrc
+
+      - name: Run post install scripts
+        run: npm rebuild && npm run prepare --if-present
+
+      - name: Code Linting
+        run: npm run lint
+
+      # - name: Unit Test
+      #   run: npm run test:cov
+
+      # - name: Integration Test
+      #   run: npm run test:e2e
+
+      - name: build-login-publish-docker image
+        uses: ebomart/build-publish-docker@main
+        with:
+          registry_host: $REGISTRY_HOSTNAME
+          gke_project: $GCR_GKE_PROJECT
+          image_name: $IMAGE
+          google_private_key: ${{ secrets.GOOGLE_PRIVATE_KEY_DEV }}
+          sha: ${{ github.sha }}
+          docker_build_args: '--build-arg NPM_TOKEN=$NPM_TOKEN'
+          npm_token: ${{ secrets.NPM_TOKEN }}
+
+      # Install helm
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      # Deploy the Docker image to the GKE cluster
+      - name: Deploy
+        env:
+          HELM_OPTS:
+            --set-string environmentVariables.ENABLE_OTP_NOTIFICATION=${{ secrets.ENABLE_OTP_NOTIFICATION_DEV }}
+            --set-string environmentVariables.ALLOWED_OTP=${{ secrets.ALLOWED_OTP_DEV }}
+            --set-string environmentVariables.ENABLE_STATIC_OTP=${{ secrets.ENABLE_STATIC_OTP_DEV }}
+            --set-string environmentVariables.GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID_DEV }}
+        run: |
+          gcloud config set project $GKE_PROJECT
+          gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER_DEV }} \
+            --zone $GKE_ZONE \
+            --project $GKE_PROJECT
+          helm upgrade --install --wait ebo-authn-services deployment/charts/$APP_NAME --namespace ebo $HELM_OPTS --set image.tag=$GITHUB_SHA -f deployment/charts/config/values-dev.yaml
