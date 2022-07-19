@@ -1,0 +1,76 @@
+# This workflow will build a package using Gradle and then publish it to GitHub packages when a release is created
+# For more information see: https://github.com/actions/setup-java/blob/main/docs/advanced-usage.md#Publishing-using-gradle
+
+name: DEV - Build and Deploy
+
+on:
+  push:
+    branches:
+      - Development
+
+env:
+  GKE_PROJECT: ${{ secrets.GCP_PROJECT_ID_DEV }}
+  GCR_GKE_PROJECT: test-project
+  GITHUB_SHA: ${{ github.sha }}
+  GKE_ZONE: asia-south1
+  GKE_NAME: culster-name
+  IMAGE: image-name
+  REGISTRY_HOSTNAME: us.gcr.io
+  CHART_NAME: service-name
+  K8_NAMESPACE: k8s-namespace
+  ENVIRONMENT: dev
+  VALUE_FILE: values-dev.yaml 
+
+
+jobs:
+  gradle-build-deploy:
+
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up JDK 11
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
+          distribution: 'adopt'
+          server-id: github # Value of the distributionManagement/repository/id field of the pom.xml
+          settings-path: ${{ github.workspace }} # location for the settings.xml file
+
+      - id: auth
+        uses: google-github-actions/auth@v0
+        with:
+          credentials_json: ${{ secrets.GOOGLE_PRIVATE_KEY_DEV }}
+
+      - id: set-up-cloud-sdk
+        uses: google-github-actions/setup-gcloud@v0
+   
+      - name: Build
+        run:  gradle wrapper && chmod 700 gradlew && ./gradlew clean build
+
+      - name: Set environment
+        run: |
+          sed -i "s/ENV_NAME/$ENVIRONMENT/" Dockerfile        
+      - name: build-login-publish-docker image
+        uses: test/test-build-publish-docker@main
+        with:
+          registry_host: $REGISTRY_HOSTNAME
+          gke_project: $GCR_GKE_PROJECT
+          image_name: $IMAGE
+          google_private_key: ${{ secrets.GOOGLE_PRIVATE_KEY_DEV }}
+          sha: ${{ github.sha }}
+          file: Dockerfile
+
+      # Install helm
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      # Deploy the Docker image to the GKE cluster
+      - name: Deploy
+        run: |
+          gcloud container clusters get-credentials $GKE_NAME \
+            --zone $GKE_ZONE \
+            --project $GKE_PROJECT
+          helm upgrade --install --namespace=$K8_NAMESPACE --wait $CHART_NAME  deployment/charts/$CHART_NAME  --set image.tag=$GITHUB_SHA -f deployment/charts/config/$VALUE_FILE
+          kubectl rollout status deployment/$CHART_NAME -n $K8_NAMESPACE
+          kubectl get services -o wide -n $K8_NAMESPACE
